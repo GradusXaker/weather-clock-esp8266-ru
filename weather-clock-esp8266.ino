@@ -1,4 +1,5 @@
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include <DHT.h>
 #include <DNSServer.h>
 #include <ESP8266HTTPClient.h>
@@ -18,6 +19,7 @@ constexpr uint8_t LCD_COLS = 16;
 constexpr uint8_t LCD_ROWS = 2;
 constexpr uint8_t DHT_PIN = D5;      // GPIO14
 constexpr uint8_t DHT_TYPE = DHT11;
+constexpr uint8_t RESET_BUTTON_PIN = D3;  // GPIO0 (кнопка FLASH на NodeMCU)
 
 // -------------------- Тайминги --------------------
 constexpr unsigned long DISPLAY_SWITCH_MS = 4000;
@@ -26,6 +28,8 @@ constexpr unsigned long DHT_READ_MS = 3000;
 constexpr unsigned long WEATHER_UPDATE_MS = 15UL * 60UL * 1000UL;
 constexpr unsigned long WIFI_RECONNECT_MIN_MS = 15000;
 constexpr unsigned long WIFI_RECONNECT_MAX_MS = 300000;
+constexpr unsigned long RESET_BUTTON_ARM_MS = 10000;
+constexpr unsigned long RESET_BUTTON_HOLD_MS = 6000;
 
 // -------------------- Wi-Fi / AP --------------------
 const char* AP_SSID = "ClockSetup";
@@ -69,6 +73,8 @@ bool portalMode = false;
 bool serverStarted = false;
 bool pendingRestart = false;
 unsigned long restartAtMs = 0;
+bool otaEnabled = false;
+String otaHostname;
 
 float localTempC = NAN;
 float localHumidity = NAN;
@@ -81,6 +87,9 @@ unsigned long lastWeatherUpdateMs = 0;
 uint8_t currentScreen = 0;
 unsigned long wifiLastReconnectTryMs = 0;
 unsigned long wifiReconnectIntervalMs = WIFI_RECONNECT_MIN_MS;
+unsigned long bootMs = 0;
+unsigned long resetButtonPressedAtMs = 0;
+bool resetTriggered = false;
 
 String htmlEscape(const String& src) {
   String out;
@@ -151,6 +160,69 @@ bool initLcd() {
   lcd->backlight();
   Serial.printf("[LCD] Адрес: 0x%02X\n", detectedLcdAddress);
   return true;
+}
+
+void scheduleRestart(unsigned long delayMs = 1500) {
+  pendingRestart = true;
+  restartAtMs = millis() + delayMs;
+}
+
+void resetConfigAndRestart() {
+  Serial.println("[CFG] Сброс настроек по кнопке");
+  LittleFS.remove(CONFIG_PATH);
+
+  config = AppConfig();
+  weather = WeatherData();
+  otaEnabled = false;
+
+  lcdPrint2("Reset config", "Reboot...");
+  scheduleRestart(1800);
+}
+
+void checkResetButton() {
+  if (millis() - bootMs < RESET_BUTTON_ARM_MS) return;
+  if (resetTriggered) return;
+
+  const bool pressed = (digitalRead(RESET_BUTTON_PIN) == LOW);
+
+  if (pressed) {
+    if (resetButtonPressedAtMs == 0) {
+      resetButtonPressedAtMs = millis();
+      Serial.println("[BTN] Кнопка сброса нажата");
+    } else if (millis() - resetButtonPressedAtMs >= RESET_BUTTON_HOLD_MS) {
+      resetTriggered = true;
+      resetConfigAndRestart();
+    }
+  } else {
+    resetButtonPressedAtMs = 0;
+  }
+}
+
+void setupOta() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (otaEnabled) return;
+
+  otaHostname = String("clock-nsk-") + String(ESP.getChipId(), HEX);
+  ArduinoOTA.setHostname(otaHostname.c_str());
+
+  ArduinoOTA.onStart([]() {
+    lcdPrint2("OTA update", "Starting...");
+    Serial.println("[OTA] Начало обновления");
+  });
+
+  ArduinoOTA.onEnd([]() {
+    lcdPrint2("OTA update", "Done");
+    Serial.println("[OTA] Обновление завершено");
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("[OTA] Ошибка: %u\n", error);
+    lcdPrint2("OTA error", String((int)error));
+  });
+
+  ArduinoOTA.begin();
+  otaEnabled = true;
+  Serial.printf("[OTA] Готово, hostname: %s\n", otaHostname.c_str());
 }
 
 void saveConfig() {
@@ -267,6 +339,7 @@ String buildSetupPage() {
 
   page += F("<button type='submit'>Сохранить</button></form>");
   page += F("<div class='card'><b>Подсказка:</b> API key берется на сайте OpenWeather. После сохранения страница станет недоступна до повторного входа в AP режим.</div>");
+  page += F("<div class='card'><b>OTA:</b> после подключения к домашнему Wi-Fi прошивка доступна через Arduino OTA в той же сети.</div>");
   page += F("<div class='card mono'>Статус: <a href='/status'>/status</a></div>");
   page += F("</main></body></html>");
   return page;
@@ -277,11 +350,13 @@ void handleRoot() {
 }
 
 void handleStatus() {
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(768);
   doc["wifiConnected"] = (WiFi.status() == WL_CONNECTED);
   doc["ip"] = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   doc["portalMode"] = portalMode;
   doc["lcdI2cAddress"] = detectedLcdAddress;
+  doc["otaEnabled"] = otaEnabled;
+  doc["otaHostname"] = otaHostname;
   doc["city"] = config.city;
   doc["utcOffsetHours"] = config.utcOffsetHours;
 
@@ -331,8 +406,7 @@ void handleSave() {
               "text/html; charset=utf-8",
               "<html><body><h2>Сохранено</h2><p>Устройство перезагружается...</p></body></html>");
 
-  pendingRestart = true;
-  restartAtMs = millis() + 1500;
+  scheduleRestart(1500);
 }
 
 void beginHttpServer() {
@@ -507,6 +581,9 @@ void renderCurrentScreen() {
 void setup() {
   Serial.begin(115200);
   delay(200);
+  bootMs = millis();
+
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
 
   Wire.begin(D2, D1);
   initLcd();
@@ -527,6 +604,7 @@ void setup() {
   } else {
     stopPortalMode();
     setupTimeClient();
+    setupOta();
     updateWeather();
   }
 
@@ -538,6 +616,7 @@ void setup() {
 
 void loop() {
   server.handleClient();
+  checkResetButton();
 
   if (portalMode) {
     dnsServer.processNextRequest();
@@ -549,6 +628,8 @@ void loop() {
 
   if (!portalMode && WiFi.status() == WL_CONNECTED) {
     timeClient.update();
+    if (!otaEnabled) setupOta();
+    ArduinoOTA.handle();
   }
 
   const unsigned long now = millis();
@@ -580,6 +661,7 @@ void loop() {
       if (WiFi.status() == WL_CONNECTED) {
         wifiReconnectIntervalMs = WIFI_RECONNECT_MIN_MS;
         setupTimeClient();
+        setupOta();
         updateWeather();
       } else {
         wifiReconnectIntervalMs = min(wifiReconnectIntervalMs * 2, WIFI_RECONNECT_MAX_MS);
