@@ -12,7 +12,8 @@
 #include <time.h>
 
 // -------------------- Аппаратные параметры --------------------
-constexpr uint8_t LCD_I2C_ADDR = 0x27;
+constexpr uint8_t LCD_ADDR_PRIMARY = 0x27;
+constexpr uint8_t LCD_ADDR_SECONDARY = 0x3F;
 constexpr uint8_t LCD_COLS = 16;
 constexpr uint8_t LCD_ROWS = 2;
 constexpr uint8_t DHT_PIN = D5;      // GPIO14
@@ -23,6 +24,8 @@ constexpr unsigned long DISPLAY_SWITCH_MS = 4000;
 constexpr unsigned long DISPLAY_REFRESH_MS = 300;
 constexpr unsigned long DHT_READ_MS = 3000;
 constexpr unsigned long WEATHER_UPDATE_MS = 15UL * 60UL * 1000UL;
+constexpr unsigned long WIFI_RECONNECT_MIN_MS = 15000;
+constexpr unsigned long WIFI_RECONNECT_MAX_MS = 300000;
 
 // -------------------- Wi-Fi / AP --------------------
 const char* AP_SSID = "ClockSetup";
@@ -46,12 +49,15 @@ struct WeatherData {
   int conditionId = 0;
   String description;
   unsigned long updatedAtMs = 0;
+  int lastHttpCode = 0;
+  String lastError;
 };
 
 AppConfig config;
 WeatherData weather;
 
-LiquidCrystal_I2C lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
+LiquidCrystal_I2C* lcd = nullptr;
+uint8_t detectedLcdAddress = 0;
 DHT dht(DHT_PIN, DHT_TYPE);
 
 DNSServer dnsServer;
@@ -73,6 +79,8 @@ unsigned long lastDhtReadMs = 0;
 unsigned long lastWeatherUpdateMs = 0;
 
 uint8_t currentScreen = 0;
+unsigned long wifiLastReconnectTryMs = 0;
+unsigned long wifiReconnectIntervalMs = WIFI_RECONNECT_MIN_MS;
 
 String htmlEscape(const String& src) {
   String out;
@@ -108,11 +116,41 @@ String urlEncode(const String& value) {
 }
 
 void lcdPrint2(const String& line1, const String& line2) {
+  if (!lcd) return;
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(line1.substring(0, LCD_COLS));
   lcd.setCursor(0, 1);
   lcd.print(line2.substring(0, LCD_COLS));
+}
+
+bool i2cDevicePresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+uint8_t detectLcdAddress() {
+  if (i2cDevicePresent(LCD_ADDR_PRIMARY)) return LCD_ADDR_PRIMARY;
+  if (i2cDevicePresent(LCD_ADDR_SECONDARY)) return LCD_ADDR_SECONDARY;
+
+  for (uint8_t addr = 8; addr < 120; addr++) {
+    if (i2cDevicePresent(addr)) return addr;
+  }
+  return 0;
+}
+
+bool initLcd() {
+  detectedLcdAddress = detectLcdAddress();
+  if (detectedLcdAddress == 0) {
+    Serial.println("[LCD] I2C устройство не найдено");
+    return false;
+  }
+
+  lcd = new LiquidCrystal_I2C(detectedLcdAddress, LCD_COLS, LCD_ROWS);
+  lcd->init();
+  lcd->backlight();
+  Serial.printf("[LCD] Адрес: 0x%02X\n", detectedLcdAddress);
+  return true;
 }
 
 void saveConfig() {
@@ -243,6 +281,7 @@ void handleStatus() {
   doc["wifiConnected"] = (WiFi.status() == WL_CONNECTED);
   doc["ip"] = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   doc["portalMode"] = portalMode;
+  doc["lcdI2cAddress"] = detectedLcdAddress;
   doc["city"] = config.city;
   doc["utcOffsetHours"] = config.utcOffsetHours;
 
@@ -254,6 +293,8 @@ void handleStatus() {
     doc["weatherConditionId"] = weather.conditionId;
     doc["weatherDescription"] = weather.description;
   }
+  doc["weatherLastHttpCode"] = weather.lastHttpCode;
+  doc["weatherLastError"] = weather.lastError;
 
   String json;
   serializeJsonPretty(doc, json);
@@ -340,6 +381,9 @@ void updateWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
   if (config.weatherApiKey.isEmpty()) return;
 
+  weather.lastHttpCode = 0;
+  weather.lastError = "";
+
   const String url = "http://api.openweathermap.org/data/2.5/weather?q=" +
                      urlEncode(config.city) +
                      "&appid=" + urlEncode(config.weatherApiKey) +
@@ -349,12 +393,25 @@ void updateWeather() {
   HTTPClient http;
   if (!http.begin(client, url)) {
     Serial.println("[WEATHER] Не удалось начать HTTP-запрос");
+    weather.lastError = "http.begin fail";
     return;
   }
 
   const int code = http.GET();
+  weather.lastHttpCode = code;
   if (code != HTTP_CODE_OK) {
+    const String payload = http.getString();
     Serial.printf("[WEATHER] Ошибка HTTP: %d\n", code);
+    weather.lastError = "HTTP " + String(code);
+    if (!payload.isEmpty()) {
+      DynamicJsonDocument errDoc(512);
+      if (!deserializeJson(errDoc, payload)) {
+        const String apiMsg = String((const char*)(errDoc["message"] | ""));
+        if (!apiMsg.isEmpty()) {
+          weather.lastError = "HTTP " + String(code) + ": " + apiMsg;
+        }
+      }
+    }
     http.end();
     return;
   }
@@ -365,6 +422,7 @@ void updateWeather() {
 
   if (err) {
     Serial.printf("[WEATHER] Ошибка JSON: %s\n", err.c_str());
+    weather.lastError = "JSON parse fail";
     return;
   }
 
@@ -373,6 +431,10 @@ void updateWeather() {
   weather.description = String((const char*)(doc["weather"][0]["description"] | ""));
   weather.valid = !isnan(weather.tempC);
   weather.updatedAtMs = millis();
+  if (!weather.valid) {
+    weather.lastError = "temp is NaN";
+    return;
+  }
 
   Serial.printf("[WEATHER] %s: %.1f C, id=%d\n", config.city.c_str(), weather.tempC, weather.conditionId);
 }
@@ -417,7 +479,11 @@ void renderWeatherScreen() {
   }
 
   if (!weather.valid) {
-    lcdPrint2("Weather wait...", config.city.substring(0, LCD_COLS));
+    if (!weather.lastError.isEmpty()) {
+      lcdPrint2("Weather error", weather.lastError.substring(0, LCD_COLS));
+    } else {
+      lcdPrint2("Weather wait...", config.city.substring(0, LCD_COLS));
+    }
     return;
   }
 
@@ -443,8 +509,7 @@ void setup() {
   delay(200);
 
   Wire.begin(D2, D1);
-  lcd.init();
-  lcd.backlight();
+  initLcd();
   lcdPrint2("Clock boot", "ESP8266");
 
   dht.begin();
@@ -509,12 +574,15 @@ void loop() {
   }
 
   if (!portalMode && WiFi.status() != WL_CONNECTED && !config.ssid.isEmpty()) {
-    static unsigned long lastReconnectTry = 0;
-    if (now - lastReconnectTry > 15000) {
-      lastReconnectTry = now;
+    if (now - wifiLastReconnectTryMs >= wifiReconnectIntervalMs) {
+      wifiLastReconnectTryMs = now;
       connectToWifi(8000);
       if (WiFi.status() == WL_CONNECTED) {
+        wifiReconnectIntervalMs = WIFI_RECONNECT_MIN_MS;
         setupTimeClient();
+        updateWeather();
+      } else {
+        wifiReconnectIntervalMs = min(wifiReconnectIntervalMs * 2, WIFI_RECONNECT_MAX_MS);
       }
     }
   }
