@@ -37,6 +37,20 @@
 
 ## 2) Библиотеки Arduino IDE
 
+### Установка поддержки ESP8266 (обязательно)
+
+1. Откройте в Arduino IDE: `Файл -> Настройки`.
+2. В поле `Additional boards manager URLs` добавьте ссылку:
+
+   `http://arduino.esp8266.com/stable/package_esp8266com_index.json`
+
+3. Откройте: `Инструменты -> Плата -> Менеджер плат`.
+4. Найдите и установите пакет: `ESP8266 by ESP8266 Community`.
+5. Выберите плату: `Инструменты -> Плата -> NodeMCU 1.0 (ESP-12E Module)`.
+
+Если этого не сделать, возможна ошибка компиляции:
+`ESP8266HTTPClient.h: No such file or directory`
+
 Установите через Library Manager:
 - `DHT sensor library` (Adafruit)
 - `LiquidCrystal I2C`

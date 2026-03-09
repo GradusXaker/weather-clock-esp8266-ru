@@ -126,11 +126,11 @@ String urlEncode(const String& value) {
 
 void lcdPrint2(const String& line1, const String& line2) {
   if (!lcd) return;
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(line1.substring(0, LCD_COLS));
-  lcd.setCursor(0, 1);
-  lcd.print(line2.substring(0, LCD_COLS));
+  lcd->clear();
+  lcd->setCursor(0, 0);
+  lcd->print(line1.substring(0, LCD_COLS));
+  lcd->setCursor(0, 1);
+  lcd->print(line2.substring(0, LCD_COLS));
 }
 
 bool i2cDevicePresent(uint8_t addr) {
