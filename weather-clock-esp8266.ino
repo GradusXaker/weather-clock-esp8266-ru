@@ -43,7 +43,6 @@ struct AppConfig {
   String ssid;
   String password;
   String city = "Novosibirsk";
-  String weatherApiKey;
   int utcOffsetHours = 7;
 };
 
@@ -230,7 +229,6 @@ void saveConfig() {
   doc["ssid"] = config.ssid;
   doc["password"] = config.password;
   doc["city"] = config.city;
-  doc["weatherApiKey"] = config.weatherApiKey;
   doc["utcOffsetHours"] = config.utcOffsetHours;
 
   File f = LittleFS.open(CONFIG_PATH, "w");
@@ -266,7 +264,6 @@ void loadConfig() {
   config.ssid = doc["ssid"] | "";
   config.password = doc["password"] | "";
   config.city = doc["city"] | "Novosibirsk";
-  config.weatherApiKey = doc["weatherApiKey"] | "";
   config.utcOffsetHours = doc["utcOffsetHours"] | 7;
 
   if (config.city.isEmpty()) config.city = "Novosibirsk";
@@ -325,12 +322,8 @@ String buildSetupPage() {
   page += htmlEscape(config.password);
   page += F("'>");
 
-  page += F("<label>Город (OpenWeather)</label><input name='city' required value='");
+  page += F("<label>Город (для погоды)</label><input name='city' required value='");
   page += htmlEscape(config.city);
-  page += F("'>");
-
-  page += F("<label>API key OpenWeather</label><input name='apiKey' required value='");
-  page += htmlEscape(config.weatherApiKey);
   page += F("'>");
 
   page += F("<label>Часовой пояс UTC (например, 7)</label><input name='utcOffsetHours' type='number' min='-12' max='14' required value='");
@@ -338,7 +331,7 @@ String buildSetupPage() {
   page += F("'>");
 
   page += F("<button type='submit'>Сохранить</button></form>");
-  page += F("<div class='card'><b>Подсказка:</b> API key берется на сайте OpenWeather. После сохранения страница станет недоступна до повторного входа в AP режим.</div>");
+  page += F("<div class='card'><b>Подсказка:</b> погода берется из интернета автоматически, API key не нужен.</div>");
   page += F("<div class='card'><b>OTA:</b> после подключения к домашнему Wi-Fi прошивка доступна через Arduino OTA в той же сети.</div>");
   page += F("<div class='card mono'>Статус: <a href='/status'>/status</a></div>");
   page += F("</main></body></html>");
@@ -380,10 +373,9 @@ void handleSave() {
   const String ssid = server.arg("ssid");
   const String password = server.arg("password");
   const String city = server.arg("city");
-  const String apiKey = server.arg("apiKey");
   const String utcRaw = server.arg("utcOffsetHours");
 
-  if (ssid.isEmpty() || city.isEmpty() || apiKey.isEmpty() || utcRaw.isEmpty()) {
+  if (ssid.isEmpty() || city.isEmpty() || utcRaw.isEmpty()) {
     server.send(400, "text/plain; charset=utf-8", "Не заполнены обязательные поля");
     return;
   }
@@ -397,7 +389,6 @@ void handleSave() {
   config.ssid = ssid;
   config.password = password;
   config.city = city;
-  config.weatherApiKey = apiKey;
   config.utcOffsetHours = utc;
 
   saveConfig();
@@ -453,15 +444,13 @@ void readDhtSensor() {
 
 void updateWeather() {
   if (WiFi.status() != WL_CONNECTED) return;
-  if (config.weatherApiKey.isEmpty()) return;
 
   weather.lastHttpCode = 0;
   weather.lastError = "";
 
-  const String url = "http://api.openweathermap.org/data/2.5/weather?q=" +
+  const String url = "http://wttr.in/" +
                      urlEncode(config.city) +
-                     "&appid=" + urlEncode(config.weatherApiKey) +
-                     "&units=metric&lang=ru";
+                     "?format=j1&lang=ru";
 
   WiFiClient client;
   HTTPClient http;
@@ -500,9 +489,12 @@ void updateWeather() {
     return;
   }
 
-  weather.tempC = doc["main"]["temp"] | NAN;
-  weather.conditionId = doc["weather"][0]["id"] | 0;
-  weather.description = String((const char*)(doc["weather"][0]["description"] | ""));
+  weather.tempC = doc["current_condition"][0]["temp_C"] | NAN;
+  weather.conditionId = doc["current_condition"][0]["weatherCode"] | 0;
+  weather.description = String((const char*)(doc["current_condition"][0]["lang_ru"][0]["value"] | ""));
+  if (weather.description.isEmpty()) {
+    weather.description = String((const char*)(doc["current_condition"][0]["weatherDesc"][0]["value"] | ""));
+  }
   weather.valid = !isnan(weather.tempC);
   weather.updatedAtMs = millis();
   if (!weather.valid) {
@@ -547,11 +539,6 @@ void renderDhtScreen() {
 }
 
 void renderWeatherScreen() {
-  if (config.weatherApiKey.isEmpty()) {
-    lcdPrint2("Weather: no key", "Open / for cfg");
-    return;
-  }
-
   if (!weather.valid) {
     if (!weather.lastError.isEmpty()) {
       lcdPrint2("Weather error", weather.lastError.substring(0, LCD_COLS));
