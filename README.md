@@ -1,13 +1,24 @@
-# Часы с погодой на NodeMCU v3 + LCD1602 I2C + DHT11
+<div align="center">
+  <h1>weather-clock-esp8266-ru</h1>
+  <p><strong>Домашняя погодная консоль в кибер-стиле.</strong> Часы, погода и OTA-настройка на `ESP8266`, `LCD1602 I2C` и `DHT11`.</p>
 
-Готовый проект на русском языке:
-- Экран 1: дата и время с секундами
-- Экран 2: температура и влажность с DHT11
-- Экран 3: погода из интернета (температура + код состояния)
-- Настройка Wi-Fi и параметров погоды с телефона через веб-страницу на ESP8266
-- Автоопределение I2C-адреса LCD (`0x27`/`0x3F`, затем сканирование)
-- OTA-обновление прошивки по Wi-Fi (Arduino OTA)
-- Сброс конфигурации кнопкой FLASH (удержание 6 секунд после загрузки)
+  <p>
+    <img src="https://img.shields.io/badge/ESP8266-NodeMCU-111827?style=for-the-badge&logo=espressif&logoColor=22C55E" alt="ESP8266 NodeMCU" />
+    <img src="https://img.shields.io/badge/LCD1602-I2C-111827?style=for-the-badge&logoColor=22C55E" alt="LCD1602 I2C" />
+    <img src="https://img.shields.io/badge/DHT11-weather-111827?style=for-the-badge&logoColor=22C55E" alt="DHT11 weather" />
+    <img src="https://img.shields.io/badge/OTA-ready-22C55E?style=for-the-badge&labelColor=0B1220" alt="OTA ready" />
+  </p>
+</div>
+
+```text
+> host: weather-clock
+> input: lcd + dht11 + wifi
+> output: local clock + internet weather + ota updates
+```
+
+## обзор
+
+Проект превращает `NodeMCU v3` в автономные часы с погодой: локальный дисплей, веб-настройка с телефона, автоопределение дисплея и обновление по сети без постоянного USB.
 
 ## Быстрый старт за 5 минут
 
