@@ -1,4 +1,6 @@
 <div align="center">
+  <img src="./banner.svg" alt="weather-clock-esp8266-ru banner" width="100%" />
+
   <h1>weather-clock-esp8266-ru</h1>
   <p><strong>Домашняя погодная консоль в кибер-стиле.</strong> Часы, погода и OTA-настройка на `ESP8266`, `LCD1602 I2C` и `DHT11`.</p>
 
